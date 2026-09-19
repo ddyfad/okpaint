@@ -1261,11 +1261,22 @@ void PaintFromCrosshair(int client)
 
 }
 
-float PaintDuplicateRadius(int size, bool displacement, bool proxy)
+float PaintDuplicateRadius(int client, int size, bool displacement, bool proxy)
 {
     if (proxy)
     {
-        return EraseRadius(ClampSize(size)) * g_cvProxySpacing.FloatValue;
+        // Decals cover area, so spacing shrinks by the sqrt of the raised limit.
+        float spacing = g_cvProxySpacing.FloatValue;
+        int limit = g_iMaxModelDecal[client];
+        if (limit > 50)
+        {
+            spacing *= SquareRoot(50.0 / float(limit));
+            if (spacing < 0.05)
+            {
+                spacing = 0.05;
+            }
+        }
+        return EraseRadius(ClampSize(size)) * spacing;
     }
 
     if (displacement)
@@ -1285,7 +1296,7 @@ bool HasNearbyPaint(int client, const float position[3], const float normal[3], 
         return false;
     }
 
-    float searchRadius = PaintDuplicateRadius(size, displacement, proxy) + PaintDuplicateRadius(sizeof(g_sSizeNames) - 1, displacement, proxy);
+    float searchRadius = PaintDuplicateRadius(client, size, displacement, proxy) + PaintDuplicateRadius(client, sizeof(g_sSizeNames) - 1, displacement, proxy);
     int lo[3], hi[3];
     for (int axis = 0; axis < 3; axis++)
     {
@@ -1329,8 +1340,8 @@ bool HasNearbyPaint(int client, const float position[3], const float normal[3], 
                     decalPosition[0] = entry[PaintEntry_X];
                     decalPosition[1] = entry[PaintEntry_Y];
                     decalPosition[2] = entry[PaintEntry_Z];
-                    float duplicateRadius = PaintDuplicateRadius(size, displacement, proxy);
-                    float existingRadius = PaintDuplicateRadius(entry[PaintEntry_Size], displacement, proxy);
+                    float duplicateRadius = PaintDuplicateRadius(client, size, displacement, proxy);
+                    float existingRadius = PaintDuplicateRadius(client, entry[PaintEntry_Size], displacement, proxy);
                     if (existingRadius > duplicateRadius)
                     {
                         duplicateRadius = existingRadius;
