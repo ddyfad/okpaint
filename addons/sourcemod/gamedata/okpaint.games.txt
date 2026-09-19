@@ -1,0 +1,36 @@
+"Games"
+{
+	"cstrike"
+	{
+		"Signatures"
+		{
+			// Resolved by symbol: engine_srv.so keeps its symbol table, so there
+			// is no byte pattern to go stale. The branches patched inside these
+			// are verified against their expected bytes before anything is written.
+			"CM_TraceToLeaf_POINT_sig"
+			{
+				"library"	"engine"
+				"linux"		"@_Z14CM_TraceToLeafILb1EEvP11TraceInfo_tiff"
+			}
+
+			"AABBTree_Ray_sig"
+			{
+				"library"	"engine"
+				"linux"		"@_ZN13CDispCollTree12AABBTree_RayERK5Ray_tRK6VectorP10CBaseTraceb"
+			}
+		}
+
+		"Addresses"
+		{
+			"CM_TraceToLeaf_POINT"
+			{
+				"signature"	"CM_TraceToLeaf_POINT_sig"
+			}
+
+			"CDispCollTree::AABBTree_Ray"
+			{
+				"signature"	"AABBTree_Ray_sig"
+			}
+		}
+	}
+}
