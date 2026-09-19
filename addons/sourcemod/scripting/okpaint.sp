@@ -94,6 +94,7 @@ ConVar g_cvDisplacements;
 ConVar g_cvProxyFlip;
 ConVar g_cvProxyRay;
 ConVar g_cvProxySpacing;
+ConVar g_cvFlushToWorld;
 bool g_bStaticProps;
 bool g_bShowBrushes;
 bool g_bPaintInside[MAXPLAYERS + 1];
@@ -318,6 +319,7 @@ public void OnPluginStart()
     g_cvProxyOffset = CreateConVar("sm_okpaint_proxy_offset", "4.0", "How far in front of the surface the proxy decal ray starts. The engine extends the ray 10% past the surface, so keep this small or thin brushes get their far face painted too.", FCVAR_NONE, true, 1.0, true, 64.0);
     g_cvProxyRay = CreateConVar("sm_okpaint_proxy_ray", "0", "Project proxy decals along the surface normal (0, deterministic, redraws reproduce the same decal) or the player's line of sight (1).", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvProxyFlip = CreateConVar("sm_okpaint_proxy_flip", "1", "Start the proxy decal ray just behind the surface. CS:S paints the faces whose normals point along the ray, so this is what lands paint on the face being looked at. Measured in game; leave on.", FCVAR_NONE, true, 0.0, true, 1.0);
+    g_cvFlushToWorld = CreateConVar("sm_okpaint_flush_to_world", "1", "Paint the wall behind a trigger or clip brush when the two are flush, so the stroke is not held to the client's per model decal limit.", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvProxySpacing = CreateConVar("sm_okpaint_proxy_spacing", "0.28", "Spacing between decals on a showbrushes proxy, as a fraction of the erase radius. The client only keeps 50 decals per model, so they have to be spread to cover anything.", FCVAR_NONE, true, 0.05, true, 1.0);
     g_cvDisplacements = CreateConVar("sm_okpaint_displacements", "1", "Also paint on nonsolid displacements. Needs the engine checks patched for the length of each trace; turns itself off if the engine does not match.", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvClips = CreateConVar("sm_okpaint_clips", "1", "Also paint on clip and nodraw brushes, drawn on the showbrushes proxy props.", FCVAR_NONE, true, 0.0, true, 1.0);
@@ -1488,7 +1490,11 @@ bool TracePaintSurface(int client, float position[3], float normal[3], int &hitb
             // Keep the normal outward; the engine paints faces that face the ray start.
             // A drawn brush flush with the world wins a tie, within the native's 1u reach.
             float brushDistance = GetVectorDistance(origin, brushPosition);
-            if (!hit || brushDistance <= distance + 1.0)
+            // Flush on the world: paint the world instead. Same look, no 50-per-model cap.
+            bool flush = hit && g_cvFlushToWorld.BoolValue && hitbox == 0 && !displacement
+                && FloatAbs(brushDistance - distance) <= 2.0
+                && GetVectorDotProduct(brushNormal, normal) > 0.98;
+            if (!flush && (!hit || brushDistance <= distance + 1.0))
             {
                 // brushId is stable across maps; SendDecal resolves it to the current prop.
                 position = brushPosition;
