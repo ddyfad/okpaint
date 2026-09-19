@@ -233,7 +233,8 @@ void PrintPaintSizeSelected(int client, int size)
 // The last value r_maxmodeldecal was seen at, -1 until the query answers.
 int g_iMaxModelDecal[MAXPLAYERS + 1];
 
-void ApplyPaintDecalLimits(int client)
+// reset false re-asks without blanking the old value, so the menu doesn't flicker
+void ApplyPaintDecalLimits(int client, bool reset = true)
 {
     if (client < 1 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client))
     {
@@ -241,7 +242,10 @@ void ApplyPaintDecalLimits(int client)
     }
 
     // Can't set it: the decal cvars lack FCVAR_SERVER_CAN_EXECUTE. Read only.
-    g_iMaxModelDecal[client] = -1;
+    if (reset)
+    {
+        g_iMaxModelDecal[client] = -1;
+    }
     QueryClientConVar(client, "r_maxmodeldecal", OnMaxModelDecalQueried);
 }
 
@@ -2540,6 +2544,8 @@ public void Frame_DrawPaint(any userid)
 
 void ShowPaintMenu(int client)
 {
+    // Ask again each time, so the entry goes away once they have raised it.
+    ApplyPaintDecalLimits(client, false);
     Menu menu = new Menu(PaintMenuHandler);
     char title[128];
     FormatEx(title, sizeof(title), "Paint  [%d / %d]", g_iLiveCount[client], g_cvLimit.IntValue);
@@ -2570,8 +2576,7 @@ public int PaintMenuHandler(Menu menu, MenuAction action, int client, int item)
                 g_ChatStrings.sVariable2, g_iMaxModelDecal[client], g_ChatStrings.sText);
             Shavit_PrintToChat(client, "Paste this in console: %sr_maxmodeldecal 2048", g_ChatStrings.sVariable2);
             Shavit_PrintToChat(client, "The server is not allowed to set it for you; this one is yours to change.");
-            // Pick up the new value so the entry goes away once it is done.
-            ApplyPaintDecalLimits(client);
+            ApplyPaintDecalLimits(client, false);
             return 0;
         }
         if (StrEqual(choice, "colour"))
