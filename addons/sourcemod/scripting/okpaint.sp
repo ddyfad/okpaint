@@ -96,6 +96,7 @@ ConVar g_cvProxyRay;
 ConVar g_cvProxySpacing;
 ConVar g_cvFlushToWorld;
 bool g_bStaticProps;
+bool g_bStaticPropsTrace;
 bool g_bShowBrushes;
 bool g_bPaintInside[MAXPLAYERS + 1];
 
@@ -149,6 +150,7 @@ bool g_bRenderQueued[MAXPLAYERS + 1];
 bool g_bRenderAgain[MAXPLAYERS + 1];
 bool g_bEraseRedrawPending[MAXPLAYERS + 1];
 bool g_bRenderStolenPaint[MAXPLAYERS + 1];
+bool g_bInsertPending[MAXPLAYERS + 1];
 
 float g_fRenderAt[MAXPLAYERS + 1];
 
@@ -159,6 +161,7 @@ ArrayList g_hStolenPaints[MAXPLAYERS + 1];
 StringMap g_hStolenGrid[MAXPLAYERS + 1];
 ArrayList g_hStolenGridBuckets[MAXPLAYERS + 1];
 StringMap g_hCancelledInsertTokens;
+ArrayList g_hPendingDeletes;
 
 char g_sMap[PLATFORM_MAX_PATH];
 int g_iMapSerial;
@@ -271,6 +274,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
     MarkNativeAsOptional("StaticProp_GetOrigin");
     MarkNativeAsOptional("StaticProp_GetAngles");
     MarkNativeAsOptional("StaticProp_GetOBBBounds");
+    MarkNativeAsOptional("TraceRayAgainstStaticProps");
     return APLRes_Success;
 }
 
@@ -294,6 +298,7 @@ public void OnAllPluginsLoaded()
 {
     g_bShowBrushes = LibraryExists("showbrushes");
     g_bStaticProps = GetFeatureStatus(FeatureType_Native, "GetTotalNumberOfStaticProps") == FeatureStatus_Available;
+    g_bStaticPropsTrace = GetFeatureStatus(FeatureType_Native, "TraceRayAgainstStaticProps") == FeatureStatus_Available;
     if (!g_bStaticProps)
     {
         LogMessage("okpaint: StaticProps extension not present, nonsolid static props will not be paintable.");
@@ -305,6 +310,7 @@ public void OnPluginStart()
     LoadTranslations("common.phrases");
 
     g_hCancelledInsertTokens = new StringMap();
+    g_hPendingDeletes = new ArrayList();
     g_hNoSolidHits = new ArrayList();
     SetupDisplacementPatches();
     g_hProfiler = new Profiler();
@@ -371,6 +377,20 @@ public void OnMapStart()
         ResetClientPaint(client, true);
         g_bLoadRequested[client] = IsClientInGame(client) && !IsFakeClient(client);
     }
+}
+
+public void OnMapEnd()
+{
+    for (int client = 1; client <= MaxClients; client++)
+    {
+        FlushPaintInserts(client);
+    }
+    FlushPaintDeletes();
+}
+
+public void OnPluginEnd()
+{
+    OnMapEnd();
 }
 
 public void OnClientPutInServer(int client)
@@ -1195,6 +1215,12 @@ public void OnGameFrame()
         {
             BeginPaintRedraw(client);
         }
+
+        // New paint is saved in one transaction once the stroke is over.
+        if (!g_bPainting[client])
+        {
+            FlushPaintInserts(client);
+        }
     }
 }
 
@@ -1258,9 +1284,7 @@ void PaintFromCrosshair(int client)
 
     g_iStrokeDrawn[client]++;
 
-    int index = AddCacheEntry(client, 0, position, normal, hitbox, hammerid, colour, size);
-    QueueInsertPaint(client, index);
-
+    AddCacheEntry(client, 0, position, normal, hitbox, hammerid, colour, size);
 }
 
 float PaintDuplicateRadius(int client, int size, bool displacement, bool proxy)
@@ -1516,14 +1540,28 @@ bool TracePaintSurface(int client, float position[3], float normal[3], int &hitb
 // manager what the ray crosses.
 bool TraceStaticProp(const float origin[3], const float angles[3], float range, float position[3], float normal[3], float &distance, int &propIndex)
 {
-    int total = GetTotalNumberOfStaticProps();
-    if (total <= 0)
+    float direction[3], end[3], mins[3], maxs[3];
+    GetAngleVectors(angles, direction, NULL_VECTOR, NULL_VECTOR);
+
+    if (g_bStaticPropsTrace)
+    {
+        propIndex = TraceRayAgainstStaticProps(origin, direction, range, distance, normal);
+        if (propIndex < 0)
+        {
+            return false;
+        }
+
+        position = direction;
+        ScaleVector(position, distance);
+        AddVectors(origin, position, position);
+        return true;
+    }
+
+    if (GetTotalNumberOfStaticProps() <= 0)
     {
         return false;
     }
 
-    float direction[3], end[3], mins[3], maxs[3];
-    GetAngleVectors(angles, direction, NULL_VECTOR, NULL_VECTOR);
     end = direction;
     ScaleVector(end, range);
     AddVectors(origin, end, end);
@@ -1534,8 +1572,9 @@ bool TraceStaticProp(const float origin[3], const float angles[3], float range, 
         maxs[i] = ((origin[i] > end[i]) ? origin[i] : end[i]) + 8.0;
     }
 
-    int[] indexes = new int[total];
-    int found = GetIndexesOfStaticPropsOverlappingAABB(indexes, total, mins, maxs);
+    // Static rather than sized per call: maps with thousands of props overflowed the plugin heap.
+    static int indexes[65536];
+    int found = GetIndexesOfStaticPropsOverlappingAABB(indexes, sizeof(indexes), mins, maxs);
 
     bool hit = false;
     for (int item = 0; item < found; item++)
@@ -1794,6 +1833,8 @@ void SetupDisplacementPatches()
                 return;
             }
             g_iDispOriginal[patch][i] = actual;
+            // Writing the same byte back unprotects the page once, so traces can skip mprotect.
+            StoreToAddress(g_aDispPatch[patch] + view_as<Address>(i), actual, NumberType_Int8);
         }
     }
 
@@ -1814,7 +1855,7 @@ void PatchDisplacements(bool patched)
         {
             // nop, so the branch falls through.
             StoreToAddress(g_aDispPatch[patch] + view_as<Address>(i),
-                patched ? 0x90 : g_iDispOriginal[patch][i], NumberType_Int8);
+                patched ? 0x90 : g_iDispOriginal[patch][i], NumberType_Int8, false);
         }
     }
 }
@@ -1966,7 +2007,7 @@ bool SendDecal(int client, const float position[3], const float normal[3], int h
     return true;
 }
 
-int AddCacheEntry(int client, int id, const float position[3], const float normal[3], int hitbox, int hammerid, int colour, int size)
+void AddCacheEntry(int client, int id, const float position[3], const float normal[3], int hitbox, int hammerid, int colour, int size)
 {
     if (g_hPaints[client] == null)
     {
@@ -1991,7 +2032,10 @@ int AddCacheEntry(int client, int id, const float position[3], const float norma
     int index = g_hPaints[client].PushArray(entry, sizeof(entry));
     AddGridEntry(client, position, index);
     g_iLiveCount[client]++;
-    return index;
+    if (id == 0)
+    {
+        g_bInsertPending[client] = true;
+    }
 }
 
 void CommitStolenPaint(int client)
@@ -2019,26 +2063,38 @@ void CommitStolenPaint(int client)
         normal[1] = entry[PaintEntry_NormalY];
         normal[2] = entry[PaintEntry_NormalZ];
 
-        int index = AddCacheEntry(client, 0, position, normal, entry[PaintEntry_Hitbox], entry[PaintEntry_HammerId], entry[PaintEntry_Colour], entry[PaintEntry_Size]);
-        QueueInsertPaint(client, index);
+        AddCacheEntry(client, 0, position, normal, entry[PaintEntry_Hitbox], entry[PaintEntry_HammerId], entry[PaintEntry_Colour], entry[PaintEntry_Size]);
     }
 
     ResetStolenPaint(client);
     QueuePaintRedraw(client, 0.0);
 }
 
-void QueueInsertPaint(int client, int index)
+void FlushPaintInserts(int client)
 {
-    if (g_hDatabase == null || g_hPaints[client] == null)
+    if (!g_bInsertPending[client] || g_hDatabase == null || g_hPaints[client] == null || !IsClientInGame(client))
     {
         return;
     }
 
-    any entry[PaintEntry];
-    g_hPaints[client].GetArray(index, entry, sizeof(entry));
+    g_bInsertPending[client] = false;
 
-    if (entry[PaintEntry_InsertToken] == 0)
+    char steamId[64], escapedSteamId[128], escapedMap[PLATFORM_MAX_PATH * 2 + 1];
+    GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId), true);
+    g_hDatabase.Escape(steamId, escapedSteamId, sizeof(escapedSteamId));
+    g_hDatabase.Escape(g_sMap, escapedMap, sizeof(escapedMap));
+
+    Transaction transaction = new Transaction();
+    int queued = 0;
+    for (int index = 0; index < g_hPaints[client].Length; index++)
     {
+        any entry[PaintEntry];
+        g_hPaints[client].GetArray(index, entry, sizeof(entry));
+        if (!entry[PaintEntry_Alive] || entry[PaintEntry_Id] != 0 || entry[PaintEntry_InsertToken] != 0)
+        {
+            continue;
+        }
+
         g_iNextInsertToken++;
         if (g_iNextInsertToken <= 0)
         {
@@ -2047,22 +2103,20 @@ void QueueInsertPaint(int client, int index)
 
         entry[PaintEntry_InsertToken] = g_iNextInsertToken;
         g_hPaints[client].SetArray(index, entry, sizeof(entry));
+
+        char query[640];
+        FormatEx(query, sizeof(query), "INSERT INTO okpaint_decals (steamid, map, pos_x, pos_y, pos_z, normal_x, normal_y, normal_z, hitbox, hammerid, colour, size, created_at) VALUES ('%s', '%s', %.6f, %.6f, %.6f, %.5f, %.5f, %.5f, %d, %d, %d, %d, %d)", escapedSteamId, escapedMap, entry[PaintEntry_X], entry[PaintEntry_Y], entry[PaintEntry_Z], entry[PaintEntry_NormalX], entry[PaintEntry_NormalY], entry[PaintEntry_NormalZ], entry[PaintEntry_Hitbox], entry[PaintEntry_HammerId], entry[PaintEntry_Colour], entry[PaintEntry_Size], GetTime());
+        transaction.AddQuery(query, entry[PaintEntry_InsertToken]);
+        queued++;
     }
 
-    char steamId[64], escapedSteamId[128], escapedMap[PLATFORM_MAX_PATH * 2 + 1];
-    GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId), true);
-    g_hDatabase.Escape(steamId, escapedSteamId, sizeof(escapedSteamId));
-    g_hDatabase.Escape(g_sMap, escapedMap, sizeof(escapedMap));
+    if (queued == 0)
+    {
+        delete transaction;
+        return;
+    }
 
-    char query[640];
-    FormatEx(query, sizeof(query), "INSERT INTO okpaint_decals (steamid, map, pos_x, pos_y, pos_z, normal_x, normal_y, normal_z, hitbox, hammerid, colour, size, created_at) VALUES ('%s', '%s', %.6f, %.6f, %.6f, %.5f, %.5f, %.5f, %d, %d, %d, %d, %d)", escapedSteamId, escapedMap, entry[PaintEntry_X], entry[PaintEntry_Y], entry[PaintEntry_Z], entry[PaintEntry_NormalX], entry[PaintEntry_NormalY], entry[PaintEntry_NormalZ], entry[PaintEntry_Hitbox], entry[PaintEntry_HammerId], entry[PaintEntry_Colour], entry[PaintEntry_Size], GetTime());
-
-    DataPack pack = new DataPack();
-    pack.WriteCell(GetClientUserId(client));
-    pack.WriteCell(g_iGeneration[client]);
-    pack.WriteCell(index);
-    pack.WriteCell(entry[PaintEntry_InsertToken]);
-    g_hDatabase.Query(SQL_InsertPaintCallback, query, pack);
+    g_hDatabase.Execute(transaction, SQL_InsertPaintSuccess, SQL_InsertPaintFailure, GetClientUserId(client));
 }
 
 void CancelPendingInsert(int insertToken)
@@ -2102,49 +2156,55 @@ void ForgetCancelledInsert(int insertToken)
     g_hCancelledInsertTokens.Remove(key);
 }
 
-public void SQL_InsertPaintCallback(Database db, DBResultSet results, const char[] error, any data)
+public void SQL_InsertPaintSuccess(Database db, any userid, int numQueries, DBResultSet[] results, any[] queryData)
 {
-    DataPack pack = view_as<DataPack>(data);
-    pack.Reset();
-    int userid = pack.ReadCell();
-    int generation = pack.ReadCell();
-    int index = pack.ReadCell();
-    int insertToken = pack.ReadCell();
-    delete pack;
-
-    if (results == null)
+    StringMap ids = new StringMap();
+    char key[12];
+    for (int query = 0; query < numQueries; query++)
     {
-        ForgetCancelledInsert(insertToken);
-        LogError("okpaint insert failed: %s", error);
-        return;
-    }
+        int id = results[query].InsertId;
+        if (IsInsertCancelled(queryData[query]))
+        {
+            ForgetCancelledInsert(queryData[query]);
+            QueueDeletePaint(id);
+            continue;
+        }
 
-    int id = results.InsertId;
-    if (IsInsertCancelled(insertToken))
-    {
-        ForgetCancelledInsert(insertToken);
-        DeletePaintRow(id);
-        return;
+        IntToString(queryData[query], key, sizeof(key));
+        ids.SetValue(key, id);
     }
+    FlushPaintDeletes();
 
+    // Entries are matched by token, not index, because erasing compacts the list.
     int client = GetClientOfUserId(userid);
-    if (client <= 0 || generation != g_iGeneration[client] || g_hPaints[client] == null || index >= g_hPaints[client].Length)
+    if (client > 0 && g_hPaints[client] != null)
     {
-        return;
+        for (int index = 0; index < g_hPaints[client].Length; index++)
+        {
+            any entry[PaintEntry];
+            g_hPaints[client].GetArray(index, entry, sizeof(entry));
+            if (entry[PaintEntry_Id] != 0 || entry[PaintEntry_InsertToken] == 0)
+            {
+                continue;
+            }
+
+            IntToString(entry[PaintEntry_InsertToken], key, sizeof(key));
+            if (ids.GetValue(key, entry[PaintEntry_Id]))
+            {
+                g_hPaints[client].SetArray(index, entry, sizeof(entry));
+            }
+        }
     }
 
-    any entry[PaintEntry];
-    g_hPaints[client].GetArray(index, entry, sizeof(entry));
-    if (entry[PaintEntry_InsertToken] != insertToken)
-    {
-        return;
-    }
-    entry[PaintEntry_Id] = id;
-    g_hPaints[client].SetArray(index, entry, sizeof(entry));
+    delete ids;
+}
 
-    if (!entry[PaintEntry_Alive])
+public void SQL_InsertPaintFailure(Database db, any userid, int numQueries, const char[] error, int failIndex, any[] queryData)
+{
+    LogError("okpaint insert failed at query %d: %s", failIndex, error);
+    for (int query = 0; query < numQueries; query++)
     {
-        DeletePaintRow(id);
+        ForgetCancelledInsert(queryData[query]);
     }
 }
 
@@ -2154,7 +2214,7 @@ void EraseFromCrosshair(int client)
     {
         if (!g_cvEnabled.BoolValue || !g_bLoaded[client])
         {
-            g_bErasing[client] = false;
+            FinishErasing(client, false);
         }
         return;
     }
@@ -2181,7 +2241,6 @@ void EraseFromCrosshair(int client)
 
     g_iErasedThisSession[client] += erased;
     g_bEraseRedrawPending[client] = true;
-    QueuePaintRedraw(client, PAINT_REDRAW_DELAY);
 
     int tick = GetGameTickCount();
     if (tick - g_iLastEraseHintTick[client] >= PAINT_ERASE_HINT_TICKS)
@@ -2244,7 +2303,7 @@ int ErasePaintCache(int client, ArrayList paints, StringMap grid, const float ai
                         g_iLiveCount[client]--;
                         if (entry[PaintEntry_Id] > 0)
                         {
-                            DeletePaintRow(entry[PaintEntry_Id]);
+                            QueueDeletePaint(entry[PaintEntry_Id]);
                         }
                         else
                         {
@@ -2352,6 +2411,8 @@ void FinishErasing(int client, bool announce = true)
     }
 
     g_bEraseRedrawPending[client] = false;
+    CompactPaintCache(client);
+    FlushPaintDeletes();
     QueuePaintRedraw(client, PAINT_REDRAW_DELAY);
 
     if (announce && g_iErasedThisSession[client] > 0)
@@ -2362,16 +2423,79 @@ void FinishErasing(int client, bool announce = true)
     g_iErasedThisSession[client] = 0;
 }
 
-void DeletePaintRow(int id)
+void QueueDeletePaint(int id)
 {
-    if (g_hDatabase == null || id <= 0)
+    if (id > 0)
+    {
+        g_hPendingDeletes.Push(id);
+    }
+}
+
+void FlushPaintDeletes()
+{
+    if (g_hDatabase == null || g_hPendingDeletes.Length == 0)
     {
         return;
     }
 
-    char query[128];
-    FormatEx(query, sizeof(query), "DELETE FROM okpaint_decals WHERE id = %d", id);
-    g_hDatabase.Query(SQL_GenericCallback, query);
+    char query[4096];
+    int length;
+    for (int item = 0; item < g_hPendingDeletes.Length; item++)
+    {
+        if (length == 0)
+        {
+            length = strcopy(query, sizeof(query), "DELETE FROM okpaint_decals WHERE id IN (");
+        }
+        else
+        {
+            length += strcopy(query[length], sizeof(query) - length, ",");
+        }
+        length += IntToString(g_hPendingDeletes.Get(item), query[length], sizeof(query) - length);
+
+        if (length > sizeof(query) - 16 || item == g_hPendingDeletes.Length - 1)
+        {
+            strcopy(query[length], sizeof(query) - length, ")");
+            g_hDatabase.Query(SQL_GenericCallback, query);
+            length = 0;
+        }
+    }
+    g_hPendingDeletes.Clear();
+}
+
+// Erased entries are only flagged dead; drop them so replays and grid lookups stop walking them.
+void CompactPaintCache(int client)
+{
+    ArrayList paints = g_hPaints[client];
+    if (paints == null || g_hGridBuckets[client] == null)
+    {
+        return;
+    }
+
+    for (int item = 0; item < g_hGridBuckets[client].Length; item++)
+    {
+        ArrayList bucket = g_hGridBuckets[client].Get(item);
+        bucket.Clear();
+    }
+
+    int kept = 0;
+    for (int index = 0; index < paints.Length; index++)
+    {
+        any entry[PaintEntry];
+        paints.GetArray(index, entry, sizeof(entry));
+        if (!entry[PaintEntry_Alive])
+        {
+            continue;
+        }
+
+        paints.SetArray(kept, entry, sizeof(entry));
+        float position[3];
+        position[0] = entry[PaintEntry_X];
+        position[1] = entry[PaintEntry_Y];
+        position[2] = entry[PaintEntry_Z];
+        AddGridEntry(client, position, kept);
+        kept++;
+    }
+    paints.Resize(kept);
 }
 
 void AddGridEntry(int client, const float position[3], int index)
@@ -2926,6 +3050,9 @@ void ResetClientPaint(int client, bool destroy)
     {
         return;
     }
+
+    FlushPaintInserts(client);
+    FlushPaintDeletes();
 
     g_iGeneration[client]++;
     g_iLiveCount[client] = 0;
