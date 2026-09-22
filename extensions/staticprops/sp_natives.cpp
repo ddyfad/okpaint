@@ -358,6 +358,117 @@ cell_t SP_StaticProp_GetModelName(IPluginContext *pContext, const cell_t *params
 }
 
 
+// Slab test on the prop's oriented box; false when the ray starts inside it.
+static bool RayHitsOBB(const Vector& start, const Vector& dir, ICollideable *prop, float range, float& distance, Vector& normal)
+{
+	Vector fwd, right, up;
+	AngleVectors(prop->GetCollisionAngles(), &fwd, &right, &up);
+	Vector delta = start - prop->GetCollisionOrigin();
+	const Vector& mins = prop->OBBMins();
+	const Vector& maxs = prop->OBBMaxs();
+
+	// Local +Y is left, so the right vector is negated.
+	float localStart[3] = { delta.Dot(fwd), -delta.Dot(right), delta.Dot(up) };
+	float localDir[3]   = { dir.Dot(fwd),   -dir.Dot(right),   dir.Dot(up)   };
+
+	float tMin = 0.0f, tMax = range;
+	int axis = -1;
+	bool atMaxFace = false;
+
+	for (int i = 0; i < 3; ++i) {
+		if (fabsf(localDir[i]) < 0.000001f) {
+			if (localStart[i] < mins[i] || localStart[i] > maxs[i]) {
+				return false;
+			}
+			continue;
+		}
+
+		float inverse = 1.0f / localDir[i];
+		float tNear = (mins[i] - localStart[i]) * inverse;
+		float tFar  = (maxs[i] - localStart[i]) * inverse;
+		bool flipped = false;
+		if (tNear > tFar) {
+			V_swap(tNear, tFar);
+			flipped = true;
+		}
+
+		if (tNear > tMin) {
+			tMin = tNear;
+			axis = i;
+			atMaxFace = flipped;
+		}
+		if (tFar < tMax) {
+			tMax = tFar;
+		}
+		if (tMin > tMax) {
+			return false;
+		}
+	}
+
+	if (axis < 0 || tMin <= 0.0f) {
+		return false;
+	}
+
+	float localNormal[3] = { 0.0f, 0.0f, 0.0f };
+	localNormal[axis] = atMaxFace ? 1.0f : -1.0f;
+	normal = fwd * localNormal[0] - right * localNormal[1] + up * localNormal[2];
+	VectorNormalize(normal);
+
+	distance = tMin;
+	return true;
+}
+
+cell_t SP_TraceRayAgainstStaticProps(IPluginContext *pContext, const cell_t *params)
+{
+	cell_t *start;     pContext->LocalToPhysAddr(params[1], &start);
+	cell_t *direction; pContext->LocalToPhysAddr(params[2], &direction);
+	const float range = sp_ctof(params[3]);
+	cell_t *distance;  pContext->LocalToPhysAddr(params[4], &distance);
+	cell_t *normal;    pContext->LocalToPhysAddr(params[5], &normal);
+
+	Vector vecStart = CellsToVector(start);
+	Vector vecDir = CellsToVector(direction);
+	VectorNormalize(vecDir);
+
+	CUtlVector<ICollideable *> props;
+	staticpropmgr->GetAllStaticProps(&props);
+
+	int best = -1;
+	float bestDistance = range;
+	Vector bestNormal;
+	FOR_EACH_VEC(props, i) {
+		// Cheap reject: the box can't reach past the sphere around its origin that holds every corner.
+		const Vector& mins = props[i]->OBBMins();
+		const Vector& maxs = props[i]->OBBMaxs();
+		Vector corner(Max(fabsf(mins.x), fabsf(maxs.x)), Max(fabsf(mins.y), fabsf(maxs.y)), Max(fabsf(mins.z), fabsf(maxs.z)));
+		float radius = corner.Length();
+
+		Vector toProp = props[i]->GetCollisionOrigin() - vecStart;
+		float along = toProp.Dot(vecDir);
+		if (along < -radius || along > bestDistance + radius || toProp.LengthSqr() - along * along > radius * radius) {
+			continue;
+		}
+
+		float hitDistance;
+		Vector hitNormal;
+		if (RayHitsOBB(vecStart, vecDir, props[i], bestDistance, hitDistance, hitNormal) && (best < 0 || hitDistance < bestDistance)) {
+			best = i;
+			bestDistance = hitDistance;
+			bestNormal = hitNormal;
+		}
+	}
+
+	if (best >= 0) {
+		*distance = sp_ftoc(bestDistance);
+		VectorToCells(bestNormal, normal);
+	}
+
+	DEBUG_LOG("%s: %d props, closest hit %d at %.1f", __FUNCTION__, props.Count(), best, best >= 0 ? bestDistance : 0.0f);
+
+	return best;
+}
+
+
 const sp_nativeinfo_t g_Natives[] = {
 	{ "GetTotalNumberOfStaticProps",            &SP_GetTotalNumberOfStaticProps            },
 	{ "GetIndexesOfStaticPropsOverlappingAABB", &SP_GetIndexesOfStaticPropsOverlappingAABB },
@@ -369,5 +480,6 @@ const sp_nativeinfo_t g_Natives[] = {
 	{ "StaticProp_GetSolidFlags",               &SP_StaticProp_GetSolidFlags               },
 	{ "StaticProp_GetCollisionGroup",           &SP_StaticProp_GetCollisionGroup           },
 	{ "StaticProp_GetModelName",                &SP_StaticProp_GetModelName                },
+	{ "TraceRayAgainstStaticProps",             &SP_TraceRayAgainstStaticProps             },
 	{ nullptr,                                  nullptr                                    },
 };

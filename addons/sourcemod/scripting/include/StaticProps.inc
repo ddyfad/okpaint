@@ -85,6 +85,11 @@ native bool StaticProp_GetSolidFlags      (int index, SolidFlags_t& solid_flags)
 native bool StaticProp_GetCollisionGroup  (int index, Collision_Group_t& collision_group); // essentially: ICollideable::GetCollisionGroup()
 native bool StaticProp_GetModelName       (int index, char[] name, int name_max);          // essentially: IVModelInfo::GetModelName(ICollideable::GetCollisionModel())
 
+// casts a ray against the oriented bounding box of every static prop, collision or not
+// returns the index of the closest prop hit within max_distance and fills distance and hit_normal, or -1 on a miss
+// a ray that starts inside a prop's box does not hit that prop
+native int TraceRayAgainstStaticProps(const float start[3], const float direction[3], float max_distance, float &distance, float hit_normal[3]);
+
 
 public Extension __ext_StaticProps = {
 	name = "StaticProps",
