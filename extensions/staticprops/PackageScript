@@ -1,0 +1,40 @@
+# vim: set ts=8 sts=2 sw=2 tw=99 et ft=python:
+import os
+
+builder.SetBuildFolder('package')
+
+folder_list = [
+  'addons/sourcemod/extensions',
+  'addons/sourcemod/scripting/include',
+]
+
+folder_map = {}
+for folder in folder_list:
+  norm_folder = os.path.normpath(folder)
+  folder_map[folder] = builder.AddFolder(norm_folder)
+
+def CopyFiles(src, dest, files):
+  if not dest:
+    dest = src
+  dest_entry = folder_map[dest]
+  for source_file in files:
+    source_path = os.path.join(builder.sourcePath, src, source_file)
+    builder.AddCopy(source_path, dest_entry)
+
+CopyFiles('../../addons/sourcemod/scripting/include', 'addons/sourcemod/scripting/include',
+  [ 'StaticProps.inc', ]
+)
+
+if builder.options.sigsegv == '1':
+  # --remove-destination, or a loaded copy dies with SIGBUS
+  for cxx_task in Extension.extensions:
+    src = os.path.join('..', cxx_task.binary.path)
+    dst = os.path.join('addons/sourcemod/extensions', os.path.basename(cxx_task.binary.path))
+    builder.AddCommand(
+      inputs  = [ cxx_task.binary ],
+      argv    = [ 'cp', '--remove-destination', src, dst ],
+      outputs = [ dst ],
+    )
+else:
+  for cxx_task in Extension.extensions:
+    builder.AddCopy(cxx_task.binary, folder_map['addons/sourcemod/extensions'])
