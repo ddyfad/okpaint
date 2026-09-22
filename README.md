@@ -9,10 +9,12 @@ well, players can also paint the trigger and clip surfaces showbrushes draws.
 ## What you need
 
 * SourceMod 1.11 or newer
-* `addons/sourcemod/plugins/okpaint.smx`
+* `addons/sourcemod/plugins/okpaint.smx` (a current build is in the repo)
 * `addons/sourcemod/gamedata/okpaint.games.txt`, which holds the signatures used to
   paint on non-solid surfaces
-* A MySQL or SQLite `storage-local` entry in `databases.cfg`
+* A MySQL or SQLite entry in `databases.cfg`, named by `sm_okpaint_database`
+  (default `storage-local`). Settings are in `cfg/sourcemod/okpaint.cfg`, written on
+  first load.
 * Optional: the StaticProps extension, for painting nonsolid static props. A CS:S
   Linux build is in `addons/sourcemod/extensions/`, source in `extensions/staticprops/`.
 * Optional: shavit's `shavit-core`, for chat colours that follow the timer's
