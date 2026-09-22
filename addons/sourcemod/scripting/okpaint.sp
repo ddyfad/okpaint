@@ -1436,6 +1436,7 @@ bool TracePaintSurface(int client, float position[3], float normal[3], int &hitb
     displacement = false;
 
     bool hit = false;
+    bool hitDrawn = false;
     float distance = 0.0;
 
     bool patchDisplacements = g_bDispPatchReady && g_cvDisplacements.BoolValue;
@@ -1470,6 +1471,7 @@ bool TracePaintSurface(int client, float position[3], float normal[3], int &hitb
         {
             hammerid = GetEntProp(worldEntity, Prop_Data, "m_iHammerID");
         }
+        hitDrawn = (TR_GetSurfaceFlags() & SURF_NODRAW) == 0 && (worldEntity <= 0 || IsBrushEntityVisible(worldEntity));
     }
 
     float nearPosition[3], nearNormal[3], nearDistance;
@@ -1484,6 +1486,7 @@ bool TracePaintSurface(int client, float position[3], float normal[3], int &hitb
         displacement = false;
         distance = nearDistance;
         hit = true;
+        hitDrawn = true;
     }
 
     float propPosition[3], propNormal[3], propDistance;
@@ -1515,7 +1518,8 @@ bool TracePaintSurface(int client, float position[3], float normal[3], int &hitb
             // A drawn brush flush with the world wins a tie, within the native's 1u reach.
             float brushDistance = GetVectorDistance(origin, brushPosition);
             // Flush on the world: paint the world instead. Same look, no 50-per-model cap.
-            bool flush = hit && g_cvFlushToWorld.BoolValue && hitbox == 0 && !displacement
+            // Only onto a surface that draws: nodraw faces and hidden brush entities show no decal.
+            bool flush = hit && hitDrawn && g_cvFlushToWorld.BoolValue && hitbox == 0 && !displacement
                 && FloatAbs(brushDistance - distance) <= 2.0
                 && GetVectorDotProduct(brushNormal, normal) > 0.98;
             if (!flush && (!hit || brushDistance <= distance + 1.0))
@@ -1777,6 +1781,17 @@ public bool EnumerateNoSolid(int entity, any data)
 }
 
 // Not every entity has m_fEffects (func_dustmotes); reading it blind throws.
+bool IsBrushEntityVisible(int entity)
+{
+    if (!IsEntityDrawn(entity) || GetEntityRenderMode(entity) == RENDER_NONE)
+    {
+        return false;
+    }
+    int r, g, b, a;
+    GetEntityRenderColor(entity, r, g, b, a);
+    return a > 0 || GetEntityRenderMode(entity) == RENDER_NORMAL;
+}
+
 bool IsEntityDrawn(int entity)
 {
     if (!HasEntProp(entity, Prop_Send, "m_fEffects"))
